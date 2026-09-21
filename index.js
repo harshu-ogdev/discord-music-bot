@@ -1,3 +1,4 @@
+```js
 const {
   Client,
   GatewayIntentBits,
@@ -46,7 +47,7 @@ app.listen(process.env.PORT || 3000, () => {
 });
 
 // =========================
-// MUSIC STORAGE
+// STORAGE
 // =========================
 
 const connections = new Map();
@@ -68,7 +69,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription("Search for a song and play its preview")
+    .setDescription("Search for a song and play it")
     .addStringOption(option =>
       option
         .setName("song")
@@ -92,6 +93,10 @@ const commands = [
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
+  if (!process.env.AUDIUS_API_KEY) {
+    console.error("AUDIUS_API_KEY is missing!");
+  }
+
   const rest = new REST({ version: "10" }).setToken(
     process.env.DISCORD_TOKEN
   );
@@ -109,76 +114,84 @@ client.once("ready", async () => {
 
     console.log("Slash commands registered!");
   } catch (error) {
-    console.error("Could not register commands:", error);
+    console.error(
+      "Could not register commands:",
+      error
+    );
   }
 });
 
 // =========================
-// SEARCH DEEZER
+// AUDIUS API REQUEST
 // =========================
 
-async function searchSong(songName) {
-  const searchUrl =
-    "https://api.deezer.com/search?q=" +
-    encodeURIComponent(songName) +
-    "&limit=1";
-
-  console.log(`Searching for: ${songName}`);
-
-  const response = await fetch(searchUrl);
+async function audiusRequest(url) {
+  const response = await fetch(url, {
+    headers: {
+      "x-api-key": process.env.AUDIUS_API_KEY
+    }
+  });
 
   if (!response.ok) {
     throw new Error(
-      `Music search failed: ${response.status}`
+      `Audius API error: ${response.status}`
     );
   }
 
-  const data = await response.json();
-
-  if (!data.data || data.data.length === 0) {
-    return null;
-  }
-
-  return data.data[0];
+  return response.json();
 }
 
 // =========================
-// DOWNLOAD PREVIEW
+// SEARCH AUDIUS
 // =========================
 
-async function downloadPreview(previewUrl) {
-  console.log("Downloading audio preview...");
+async function searchSong(songName) {
+  const url =
+    "https://api.audius.co/v1/tracks/search?query=" +
+    encodeURIComponent(songName) +
+    "&limit=5";
 
-  const response = await fetch(previewUrl);
+  console.log(`Searching Audius for: ${songName}`);
 
-  if (!response.ok) {
-    throw new Error(
-      `Preview download failed: ${response.status}`
-    );
+  const result = await audiusRequest(url);
+
+  if (
+    !result.data ||
+    result.data.length === 0
+  ) {
+    return null;
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-
-  console.log(
-    `Downloaded ${arrayBuffer.byteLength} bytes.`
+  // Find the first streamable track
+  const track = result.data.find(
+    song =>
+      song.isStreamable === true ||
+      song.isStreamable === "true"
   );
 
-  return Buffer.from(arrayBuffer);
+  return track || null;
 }
 
 // =========================
 // PLAY AUDIO
 // =========================
 
-async function playAudio(guildId, channel, previewUrl) {
+async function playAudio(
+  guildId,
+  channel,
+  trackId
+) {
   // Stop old FFmpeg
-  const oldFFmpeg = ffmpegProcesses.get(guildId);
+  const oldFFmpeg =
+    ffmpegProcesses.get(guildId);
 
   if (oldFFmpeg) {
     try {
       oldFFmpeg.kill("SIGTERM");
     } catch (error) {
-      console.log("Old FFmpeg already stopped.");
+      console.log(
+        "Old FFmpeg already stopped."
+      );
     }
 
     ffmpegProcesses.delete(guildId);
@@ -190,7 +203,8 @@ async function playAudio(guildId, channel, previewUrl) {
   if (!player) {
     player = createAudioPlayer({
       behaviors: {
-        noSubscriber: NoSubscriberBehavior.Play
+        noSubscriber:
+          NoSubscriberBehavior.Play
       }
     });
 
@@ -199,14 +213,18 @@ async function playAudio(guildId, channel, previewUrl) {
     player.on(
       AudioPlayerStatus.Playing,
       () => {
-        console.log("Discord audio player is PLAYING.");
+        console.log(
+          "Discord audio player is PLAYING."
+        );
       }
     );
 
     player.on(
       AudioPlayerStatus.Idle,
       () => {
-        console.log("Discord audio player is IDLE.");
+        console.log(
+          "Discord audio player is IDLE."
+        );
       }
     );
 
@@ -221,19 +239,26 @@ async function playAudio(guildId, channel, previewUrl) {
   player.stop();
 
   // Join voice channel
-  const connection = joinVoiceChannel({
-    channelId: channel.id,
-    guildId: guildId,
-    adapterCreator: channel.guild.voiceAdapterCreator,
-    selfDeaf: false
-  });
+  const connection =
+    joinVoiceChannel({
+      channelId: channel.id,
+      guildId: guildId,
+      adapterCreator:
+        channel.guild.voiceAdapterCreator,
+      selfDeaf: false
+    });
 
-  connections.set(guildId, connection);
+  connections.set(
+    guildId,
+    connection
+  );
 
   connection.on(
     VoiceConnectionStatus.Ready,
     () => {
-      console.log("Discord voice connection is READY.");
+      console.log(
+        "Discord voice connection is READY."
+      );
     }
   );
 
@@ -246,14 +271,15 @@ async function playAudio(guildId, channel, previewUrl) {
     }
   );
 
-  // Download the preview FIRST
-  const audioBuffer = await downloadPreview(
-    previewUrl
+  // Audius stream endpoint
+  const streamUrl =
+    `https://api.audius.co/v1/tracks/${trackId}/stream`;
+
+  console.log(
+    "Starting Audius stream..."
   );
 
-  console.log("Starting FFmpeg with downloaded audio...");
-
-  // Start FFmpeg using the downloaded audio
+  // FFmpeg reads the full Audius stream
   const ffmpeg = spawn(
     ffmpegPath,
     [
@@ -261,11 +287,12 @@ async function playAudio(guildId, channel, previewUrl) {
       "-loglevel",
       "error",
 
-      // Read audio from stdin
-      "-i",
-      "pipe:0",
+      "-headers",
+      `x-api-key: ${process.env.AUDIUS_API_KEY}\r\n`,
 
-      // Discord voice format
+      "-i",
+      streamUrl,
+
       "-f",
       "s16le",
       "-ar",
@@ -273,12 +300,11 @@ async function playAudio(guildId, channel, previewUrl) {
       "-ac",
       "2",
 
-      // Output raw PCM
       "pipe:1"
     ],
     {
       stdio: [
-        "pipe",
+        "ignore",
         "pipe",
         "pipe"
       ]
@@ -290,56 +316,65 @@ async function playAudio(guildId, channel, previewUrl) {
     ffmpeg
   );
 
-  // Send downloaded audio into FFmpeg
-  ffmpeg.stdin.write(audioBuffer);
-  ffmpeg.stdin.end();
+  ffmpeg.stderr.on(
+    "data",
+    data => {
+      const message =
+        data.toString().trim();
 
-  // FFmpeg errors
-  ffmpeg.stderr.on("data", data => {
-    const message = data.toString().trim();
-
-    if (message) {
-      console.error(
-        `FFmpeg error: ${message}`
-      );
-    }
-  });
-
-  ffmpeg.on("error", error => {
-    console.error(
-      "FFmpeg process error:",
-      error
-    );
-  });
-
-  ffmpeg.on("close", (code, signal) => {
-    console.log(
-      `FFmpeg closed. Code: ${code}, Signal: ${signal}`
-    );
-
-    if (
-      ffmpegProcesses.get(guildId) ===
-      ffmpeg
-    ) {
-      ffmpegProcesses.delete(guildId);
-    }
-  });
-
-  // Create Discord audio resource
-  const resource = createAudioResource(
-    ffmpeg.stdout,
-    {
-      inputType: StreamType.Raw
+      if (message) {
+        console.error(
+          `FFmpeg: ${message}`
+        );
+      }
     }
   );
 
-  // Connect player
+  ffmpeg.on(
+    "error",
+    error => {
+      console.error(
+        "FFmpeg process error:",
+        error
+      );
+    }
+  );
+
+  ffmpeg.on(
+    "close",
+    (code, signal) => {
+      console.log(
+        `FFmpeg closed. Code: ${code}, Signal: ${signal}`
+      );
+
+      if (
+        ffmpegProcesses.get(guildId) ===
+        ffmpeg
+      ) {
+        ffmpegProcesses.delete(
+          guildId
+        );
+      }
+    }
+  );
+
+  // Discord audio resource
+  const resource =
+    createAudioResource(
+      ffmpeg.stdout,
+      {
+        inputType:
+          StreamType.Raw
+      }
+    );
+
   connection.subscribe(player);
 
-  // Play
   player.play(resource);
 
-  console.log("Audio player started.");
+  console.log(
+    "Full track playback started."
+  );
 }
 
 // =========================
@@ -349,18 +384,22 @@ async function playAudio(guildId, channel, previewUrl) {
 client.on(
   "interactionCreate",
   async interaction => {
-    if (!interaction.isChatInputCommand()) {
+    if (
+      !interaction.isChatInputCommand()
+    ) {
       return;
     }
 
-    const guildId = interaction.guildId;
+    const guildId =
+      interaction.guildId;
 
     // =========================
     // /PING
     // =========================
 
     if (
-      interaction.commandName === "ping"
+      interaction.commandName ===
+      "ping"
     ) {
       return interaction.reply(
         "🏓 Pong!"
@@ -372,7 +411,8 @@ client.on(
     // =========================
 
     if (
-      interaction.commandName === "join"
+      interaction.commandName ===
+      "join"
     ) {
       const channel =
         interaction.member.voice.channel;
@@ -389,7 +429,8 @@ client.on(
             channelId: channel.id,
             guildId: guildId,
             adapterCreator:
-              channel.guild.voiceAdapterCreator,
+              channel.guild
+                .voiceAdapterCreator,
             selfDeaf: false
           });
 
@@ -415,7 +456,8 @@ client.on(
     // =========================
 
     if (
-      interaction.commandName === "play"
+      interaction.commandName ===
+      "play"
     ) {
       const channel =
         interaction.member.voice.channel;
@@ -436,28 +478,28 @@ client.on(
 
       try {
         const song =
-          await searchSong(songName);
+          await searchSong(
+            songName
+          );
 
         if (!song) {
           return interaction.editReply(
-            "❌ I couldn't find that song."
-          );
-        }
-
-        if (!song.preview) {
-          return interaction.editReply(
-            "❌ This song doesn't have an available preview."
+            "❌ I couldn't find a streamable track for that search."
           );
         }
 
         await playAudio(
           guildId,
           channel,
-          song.preview
+          song.id
         );
 
+        const artist =
+          song.user?.name ||
+          "Unknown artist";
+
         await interaction.editReply(
-          `▶️ Playing **${song.title}** by **${song.artist.name}**`
+          `▶️ Playing **${song.title}** by **${artist}**`
         );
       } catch (error) {
         console.error(
@@ -466,7 +508,7 @@ client.on(
         );
 
         await interaction.editReply(
-          "❌ I couldn't play that song."
+          "❌ I couldn't play that track. Check the Render logs."
         );
       }
 
@@ -478,7 +520,8 @@ client.on(
     // =========================
 
     if (
-      interaction.commandName === "stop"
+      interaction.commandName ===
+      "stop"
     ) {
       const player =
         players.get(guildId);
@@ -498,7 +541,9 @@ client.on(
 
       if (ffmpeg) {
         try {
-          ffmpeg.kill("SIGTERM");
+          ffmpeg.kill(
+            "SIGTERM"
+          );
         } catch (error) {
           console.log(
             "FFmpeg already stopped."
@@ -520,7 +565,8 @@ client.on(
     // =========================
 
     if (
-      interaction.commandName === "leave"
+      interaction.commandName ===
+      "leave"
     ) {
       const connection =
         connections.get(guildId);
@@ -545,7 +591,9 @@ client.on(
 
       if (ffmpeg) {
         try {
-          ffmpeg.kill("SIGTERM");
+          ffmpeg.kill(
+            "SIGTERM"
+          );
         } catch (error) {
           console.log(
             "FFmpeg already stopped."
@@ -559,8 +607,13 @@ client.on(
 
       connection.destroy();
 
-      connections.delete(guildId);
-      players.delete(guildId);
+      connections.delete(
+        guildId
+      );
+
+      players.delete(
+        guildId
+      );
 
       return interaction.reply(
         "👋 Left the voice channel!"
@@ -576,3 +629,4 @@ client.on(
 client.login(
   process.env.DISCORD_TOKEN
 );
+```
