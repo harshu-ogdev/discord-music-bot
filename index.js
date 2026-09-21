@@ -1,4 +1,3 @@
-```js
 const {
   Client,
   GatewayIntentBits,
@@ -114,15 +113,12 @@ client.once("ready", async () => {
 
     console.log("Slash commands registered!");
   } catch (error) {
-    console.error(
-      "Could not register commands:",
-      error
-    );
+    console.error("Could not register commands:", error);
   }
 });
 
 // =========================
-// AUDIUS API REQUEST
+// AUDIUS API
 // =========================
 
 async function audiusRequest(url) {
@@ -133,16 +129,14 @@ async function audiusRequest(url) {
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Audius API error: ${response.status}`
-    );
+    throw new Error(`Audius API error: ${response.status}`);
   }
 
   return response.json();
 }
 
 // =========================
-// SEARCH AUDIUS
+// SEARCH SONG
 // =========================
 
 async function searchSong(songName) {
@@ -151,22 +145,17 @@ async function searchSong(songName) {
     encodeURIComponent(songName) +
     "&limit=5";
 
-  console.log(`Searching Audius for: ${songName}`);
+  console.log(`Searching for: ${songName}`);
 
   const result = await audiusRequest(url);
 
-  if (
-    !result.data ||
-    result.data.length === 0
-  ) {
+  if (!result.data || result.data.length === 0) {
     return null;
   }
 
-  // Find the first streamable track
-  const track = result.data.find(
-    song =>
-      song.isStreamable === true ||
-      song.isStreamable === "true"
+  const track = result.data.find(song =>
+    song.isStreamable === true ||
+    song.isStreamable === "true"
   );
 
   return track || null;
@@ -176,457 +165,292 @@ async function searchSong(songName) {
 // PLAY AUDIO
 // =========================
 
-async function playAudio(
-  guildId,
-  channel,
-  trackId
-) {
-  // Stop old FFmpeg
-  const oldFFmpeg =
-    ffmpegProcesses.get(guildId);
+async function playAudio(guildId, channel, trackId) {
+  const oldFFmpeg = ffmpegProcesses.get(guildId);
 
   if (oldFFmpeg) {
     try {
       oldFFmpeg.kill("SIGTERM");
     } catch (error) {
-      console.log(
-        "Old FFmpeg already stopped."
-      );
+      console.log("Old FFmpeg already stopped.");
     }
 
     ffmpegProcesses.delete(guildId);
   }
 
-  // Get or create player
   let player = players.get(guildId);
 
   if (!player) {
     player = createAudioPlayer({
       behaviors: {
-        noSubscriber:
-          NoSubscriberBehavior.Play
+        noSubscriber: NoSubscriberBehavior.Play
       }
     });
 
     players.set(guildId, player);
 
-    player.on(
-      AudioPlayerStatus.Playing,
-      () => {
-        console.log(
-          "Discord audio player is PLAYING."
-        );
-      }
-    );
+    player.on(AudioPlayerStatus.Playing, () => {
+      console.log("Discord audio player is PLAYING.");
+    });
 
-    player.on(
-      AudioPlayerStatus.Idle,
-      () => {
-        console.log(
-          "Discord audio player is IDLE."
-        );
-      }
-    );
+    player.on(AudioPlayerStatus.Idle, () => {
+      console.log("Discord audio player is IDLE.");
+    });
 
     player.on("error", error => {
-      console.error(
-        "Discord audio player error:",
-        error
-      );
+      console.error("Discord audio player error:", error);
     });
   }
 
   player.stop();
 
-  // Join voice channel
-  const connection =
-    joinVoiceChannel({
-      channelId: channel.id,
-      guildId: guildId,
-      adapterCreator:
-        channel.guild.voiceAdapterCreator,
-      selfDeaf: false
-    });
+  const connection = joinVoiceChannel({
+    channelId: channel.id,
+    guildId: guildId,
+    adapterCreator: channel.guild.voiceAdapterCreator,
+    selfDeaf: false
+  });
 
-  connections.set(
-    guildId,
-    connection
-  );
+  connections.set(guildId, connection);
 
-  connection.on(
-    VoiceConnectionStatus.Ready,
-    () => {
-      console.log(
-        "Discord voice connection is READY."
-      );
-    }
-  );
+  connection.on(VoiceConnectionStatus.Ready, () => {
+    console.log("Discord voice connection is READY.");
+  });
 
-  connection.on(
-    VoiceConnectionStatus.Disconnected,
-    () => {
-      console.log(
-        "Discord voice connection DISCONNECTED."
-      );
-    }
-  );
+  connection.on(VoiceConnectionStatus.Disconnected, () => {
+    console.log("Discord voice connection DISCONNECTED.");
+  });
 
-  // Audius stream endpoint
   const streamUrl =
     `https://api.audius.co/v1/tracks/${trackId}/stream`;
 
-  console.log(
-    "Starting Audius stream..."
-  );
+  console.log("Starting full Audius stream...");
 
-  // FFmpeg reads the full Audius stream
   const ffmpeg = spawn(
     ffmpegPath,
     [
       "-hide_banner",
       "-loglevel",
       "error",
-
       "-headers",
       `x-api-key: ${process.env.AUDIUS_API_KEY}\r\n`,
-
       "-i",
       streamUrl,
-
       "-f",
       "s16le",
       "-ar",
       "48000",
       "-ac",
       "2",
-
       "pipe:1"
     ],
     {
-      stdio: [
-        "ignore",
-        "pipe",
-        "pipe"
-      ]
+      stdio: ["ignore", "pipe", "pipe"]
     }
   );
 
-  ffmpegProcesses.set(
-    guildId,
-    ffmpeg
-  );
+  ffmpegProcesses.set(guildId, ffmpeg);
 
-  ffmpeg.stderr.on(
-    "data",
-    data => {
-      const message =
-        data.toString().trim();
+  ffmpeg.stderr.on("data", data => {
+    const message = data.toString().trim();
 
-      if (message) {
-        console.error(
-          `FFmpeg: ${message}`
-        );
-      }
+    if (message) {
+      console.error(`FFmpeg: ${message}`);
     }
-  );
+  });
 
-  ffmpeg.on(
-    "error",
-    error => {
-      console.error(
-        "FFmpeg process error:",
-        error
-      );
-    }
-  );
+  ffmpeg.on("error", error => {
+    console.error("FFmpeg process error:", error);
+  });
 
-  ffmpeg.on(
-    "close",
-    (code, signal) => {
-      console.log(
-        `FFmpeg closed. Code: ${code}, Signal: ${signal}`
-      );
-
-      if (
-        ffmpegProcesses.get(guildId) ===
-        ffmpeg
-      ) {
-        ffmpegProcesses.delete(
-          guildId
-        );
-      }
-    }
-  );
-
-  // Discord audio resource
-  const resource =
-    createAudioResource(
-      ffmpeg.stdout,
-      {
-        inputType:
-          StreamType.Raw
-      }
+  ffmpeg.on("close", (code, signal) => {
+    console.log(
+      `FFmpeg closed. Code: ${code}, Signal: ${signal}`
     );
+
+    if (ffmpegProcesses.get(guildId) === ffmpeg) {
+      ffmpegProcesses.delete(guildId);
+    }
+  });
+
+  const resource = createAudioResource(ffmpeg.stdout, {
+    inputType: StreamType.Raw
+  });
 
   connection.subscribe(player);
 
   player.play(resource);
 
-  console.log(
-    "Full track playback started."
-  );
+  console.log("Full track playback started.");
 }
 
 // =========================
 // COMMAND HANDLER
 // =========================
 
-client.on(
-  "interactionCreate",
-  async interaction => {
-    if (
-      !interaction.isChatInputCommand()
-    ) {
-      return;
-    }
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) {
+    return;
+  }
 
-    const guildId =
-      interaction.guildId;
+  const guildId = interaction.guildId;
 
-    // =========================
-    // /PING
-    // =========================
+  // /ping
+  if (interaction.commandName === "ping") {
+    return interaction.reply("🏓 Pong!");
+  }
 
-    if (
-      interaction.commandName ===
-      "ping"
-    ) {
+  // /join
+  if (interaction.commandName === "join") {
+    const channel = interaction.member.voice.channel;
+
+    if (!channel) {
       return interaction.reply(
-        "🏓 Pong!"
+        "❌ Join a voice channel first!"
       );
     }
 
-    // =========================
-    // /JOIN
-    // =========================
+    try {
+      const connection = joinVoiceChannel({
+        channelId: channel.id,
+        guildId: guildId,
+        adapterCreator: channel.guild.voiceAdapterCreator,
+        selfDeaf: false
+      });
 
-    if (
-      interaction.commandName ===
-      "join"
-    ) {
-      const channel =
-        interaction.member.voice.channel;
-
-      if (!channel) {
-        return interaction.reply(
-          "❌ Join a voice channel first!"
-        );
-      }
-
-      try {
-        const connection =
-          joinVoiceChannel({
-            channelId: channel.id,
-            guildId: guildId,
-            adapterCreator:
-              channel.guild
-                .voiceAdapterCreator,
-            selfDeaf: false
-          });
-
-        connections.set(
-          guildId,
-          connection
-        );
-
-        return interaction.reply(
-          "✅ Joined your voice channel!"
-        );
-      } catch (error) {
-        console.error(error);
-
-        return interaction.reply(
-          "❌ I couldn't join the voice channel."
-        );
-      }
-    }
-
-    // =========================
-    // /PLAY
-    // =========================
-
-    if (
-      interaction.commandName ===
-      "play"
-    ) {
-      const channel =
-        interaction.member.voice.channel;
-
-      if (!channel) {
-        return interaction.reply(
-          "❌ Join a voice channel first!"
-        );
-      }
-
-      const songName =
-        interaction.options.getString(
-          "song",
-          true
-        );
-
-      await interaction.deferReply();
-
-      try {
-        const song =
-          await searchSong(
-            songName
-          );
-
-        if (!song) {
-          return interaction.editReply(
-            "❌ I couldn't find a streamable track for that search."
-          );
-        }
-
-        await playAudio(
-          guildId,
-          channel,
-          song.id
-        );
-
-        const artist =
-          song.user?.name ||
-          "Unknown artist";
-
-        await interaction.editReply(
-          `▶️ Playing **${song.title}** by **${artist}**`
-        );
-      } catch (error) {
-        console.error(
-          "Play error:",
-          error
-        );
-
-        await interaction.editReply(
-          "❌ I couldn't play that track. Check the Render logs."
-        );
-      }
-
-      return;
-    }
-
-    // =========================
-    // /STOP
-    // =========================
-
-    if (
-      interaction.commandName ===
-      "stop"
-    ) {
-      const player =
-        players.get(guildId);
-
-      if (!player) {
-        return interaction.reply(
-          "❌ Nothing is playing."
-        );
-      }
-
-      player.stop();
-
-      const ffmpeg =
-        ffmpegProcesses.get(
-          guildId
-        );
-
-      if (ffmpeg) {
-        try {
-          ffmpeg.kill(
-            "SIGTERM"
-          );
-        } catch (error) {
-          console.log(
-            "FFmpeg already stopped."
-          );
-        }
-
-        ffmpegProcesses.delete(
-          guildId
-        );
-      }
+      connections.set(guildId, connection);
 
       return interaction.reply(
-        "⏹️ Stopped the music."
+        "✅ Joined your voice channel!"
       );
-    }
-
-    // =========================
-    // /LEAVE
-    // =========================
-
-    if (
-      interaction.commandName ===
-      "leave"
-    ) {
-      const connection =
-        connections.get(guildId);
-
-      if (!connection) {
-        return interaction.reply(
-          "❌ I'm not in a voice channel."
-        );
-      }
-
-      const player =
-        players.get(guildId);
-
-      if (player) {
-        player.stop();
-      }
-
-      const ffmpeg =
-        ffmpegProcesses.get(
-          guildId
-        );
-
-      if (ffmpeg) {
-        try {
-          ffmpeg.kill(
-            "SIGTERM"
-          );
-        } catch (error) {
-          console.log(
-            "FFmpeg already stopped."
-          );
-        }
-
-        ffmpegProcesses.delete(
-          guildId
-        );
-      }
-
-      connection.destroy();
-
-      connections.delete(
-        guildId
-      );
-
-      players.delete(
-        guildId
-      );
+    } catch (error) {
+      console.error(error);
 
       return interaction.reply(
-        "👋 Left the voice channel!"
+        "❌ I couldn't join the voice channel."
       );
     }
   }
-);
+
+  // /play
+  if (interaction.commandName === "play") {
+    const channel = interaction.member.voice.channel;
+
+    if (!channel) {
+      return interaction.reply(
+        "❌ Join a voice channel first!"
+      );
+    }
+
+    const songName = interaction.options.getString(
+      "song",
+      true
+    );
+
+    await interaction.deferReply();
+
+    try {
+      const song = await searchSong(songName);
+
+      if (!song) {
+        return interaction.editReply(
+          "❌ I couldn't find a streamable track for that search."
+        );
+      }
+
+      await playAudio(
+        guildId,
+        channel,
+        song.id
+      );
+
+      const artist =
+        song.user?.name || "Unknown artist";
+
+      await interaction.editReply(
+        `▶️ Playing **${song.title}** by **${artist}**`
+      );
+    } catch (error) {
+      console.error("Play error:", error);
+
+      await interaction.editReply(
+        "❌ I couldn't play that track. Check the Render logs."
+      );
+    }
+
+    return;
+  }
+
+  // /stop
+  if (interaction.commandName === "stop") {
+    const player = players.get(guildId);
+
+    if (!player) {
+      return interaction.reply(
+        "❌ Nothing is playing."
+      );
+    }
+
+    player.stop();
+
+    const ffmpeg = ffmpegProcesses.get(guildId);
+
+    if (ffmpeg) {
+      try {
+        ffmpeg.kill("SIGTERM");
+      } catch (error) {
+        console.log("FFmpeg already stopped.");
+      }
+
+      ffmpegProcesses.delete(guildId);
+    }
+
+    return interaction.reply(
+      "⏹️ Stopped the music."
+    );
+  }
+
+  // /leave
+  if (interaction.commandName === "leave") {
+    const connection = connections.get(guildId);
+
+    if (!connection) {
+      return interaction.reply(
+        "❌ I'm not in a voice channel."
+      );
+    }
+
+    const player = players.get(guildId);
+
+    if (player) {
+      player.stop();
+    }
+
+    const ffmpeg = ffmpegProcesses.get(guildId);
+
+    if (ffmpeg) {
+      try {
+        ffmpeg.kill("SIGTERM");
+      } catch (error) {
+        console.log("FFmpeg already stopped.");
+      }
+
+      ffmpegProcesses.delete(guildId);
+    }
+
+    connection.destroy();
+
+    connections.delete(guildId);
+    players.delete(guildId);
+
+    return interaction.reply(
+      "👋 Left the voice channel!"
+    );
+  }
+});
 
 // =========================
 // LOGIN
 // =========================
 
-client.login(
-  process.env.DISCORD_TOKEN
-);
-```
+client.login(process.env.DISCORD_TOKEN);
