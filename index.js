@@ -109,10 +109,7 @@ client.once("ready", async () => {
 
     console.log("Slash commands registered!");
   } catch (error) {
-    console.error(
-      "Could not register commands:",
-      error
-    );
+    console.error("Could not register commands:", error);
   }
 });
 
@@ -125,6 +122,8 @@ async function searchSong(songName) {
     "https://api.deezer.com/search?q=" +
     encodeURIComponent(songName) +
     "&limit=1";
+
+  console.log(`Searching for: ${songName}`);
 
   const response = await fetch(searchUrl);
 
@@ -144,16 +143,40 @@ async function searchSong(songName) {
 }
 
 // =========================
+// DOWNLOAD PREVIEW
+// =========================
+
+async function downloadPreview(previewUrl) {
+  console.log("Downloading audio preview...");
+
+  const response = await fetch(previewUrl);
+
+  if (!response.ok) {
+    throw new Error(
+      `Preview download failed: ${response.status}`
+    );
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+
+  console.log(
+    `Downloaded ${arrayBuffer.byteLength} bytes.`
+  );
+
+  return Buffer.from(arrayBuffer);
+}
+
+// =========================
 // PLAY AUDIO
 // =========================
 
-function playAudio(guildId, channel, previewUrl) {
-  // Stop previous FFmpeg process
+async function playAudio(guildId, channel, previewUrl) {
+  // Stop old FFmpeg
   const oldFFmpeg = ffmpegProcesses.get(guildId);
 
   if (oldFFmpeg) {
     try {
-      oldFFmpeg.kill();
+      oldFFmpeg.kill("SIGTERM");
     } catch (error) {
       console.log("Old FFmpeg already stopped.");
     }
@@ -161,7 +184,7 @@ function playAudio(guildId, channel, previewUrl) {
     ffmpegProcesses.delete(guildId);
   }
 
-  // Get or create audio player
+  // Get or create player
   let player = players.get(guildId);
 
   if (!player) {
@@ -195,10 +218,9 @@ function playAudio(guildId, channel, previewUrl) {
     });
   }
 
-  // Stop anything currently playing
   player.stop();
 
-  // Join the voice channel
+  // Join voice channel
   const connection = joinVoiceChannel({
     channelId: channel.id,
     guildId: guildId,
@@ -224,38 +246,39 @@ function playAudio(guildId, channel, previewUrl) {
     }
   );
 
-  connection.on(
-    VoiceConnectionStatus.Destroyed,
-    () => {
-      console.log(
-        "Discord voice connection DESTROYED."
-      );
-    }
+  // Download the preview FIRST
+  const audioBuffer = await downloadPreview(
+    previewUrl
   );
 
-  console.log("Starting FFmpeg...");
-  console.log("Audio URL received.");
+  console.log("Starting FFmpeg with downloaded audio...");
 
-  // Start FFmpeg
+  // Start FFmpeg using the downloaded audio
   const ffmpeg = spawn(
     ffmpegPath,
     [
       "-hide_banner",
       "-loglevel",
-      "verbose",
+      "error",
+
+      // Read audio from stdin
       "-i",
-      previewUrl,
+      "pipe:0",
+
+      // Discord voice format
       "-f",
       "s16le",
       "-ar",
       "48000",
       "-ac",
       "2",
+
+      // Output raw PCM
       "pipe:1"
     ],
     {
       stdio: [
-        "ignore",
+        "pipe",
         "pipe",
         "pipe"
       ]
@@ -267,21 +290,17 @@ function playAudio(guildId, channel, previewUrl) {
     ffmpeg
   );
 
-  // FFmpeg errors / information
+  // Send downloaded audio into FFmpeg
+  ffmpeg.stdin.write(audioBuffer);
+  ffmpeg.stdin.end();
+
+  // FFmpeg errors
   ffmpeg.stderr.on("data", data => {
-    console.log(
-      `FFmpeg: ${data.toString()}`
-    );
-  });
+    const message = data.toString().trim();
 
-  // Confirm that FFmpeg is actually producing audio
-  let audioDataDetected = false;
-
-  ffmpeg.stdout.on("data", () => {
-    if (!audioDataDetected) {
-      audioDataDetected = true;
-      console.log(
-        "FFmpeg is sending audio data."
+    if (message) {
+      console.error(
+        `FFmpeg error: ${message}`
       );
     }
   });
@@ -314,10 +333,10 @@ function playAudio(guildId, channel, previewUrl) {
     }
   );
 
-  // Connect player to voice connection
+  // Connect player
   connection.subscribe(player);
 
-  // Start playing
+  // Play
   player.play(resource);
 
   console.log("Audio player started.");
@@ -370,8 +389,7 @@ client.on(
             channelId: channel.id,
             guildId: guildId,
             adapterCreator:
-              channel.guild
-                .voiceAdapterCreator,
+              channel.guild.voiceAdapterCreator,
             selfDeaf: false
           });
 
@@ -417,10 +435,6 @@ client.on(
       await interaction.deferReply();
 
       try {
-        console.log(
-          `Searching for: ${songName}`
-        );
-
         const song =
           await searchSong(songName);
 
@@ -436,7 +450,7 @@ client.on(
           );
         }
 
-        playAudio(
+        await playAudio(
           guildId,
           channel,
           song.preview
@@ -484,7 +498,7 @@ client.on(
 
       if (ffmpeg) {
         try {
-          ffmpeg.kill();
+          ffmpeg.kill("SIGTERM");
         } catch (error) {
           console.log(
             "FFmpeg already stopped."
@@ -531,7 +545,7 @@ client.on(
 
       if (ffmpeg) {
         try {
-          ffmpeg.kill();
+          ffmpeg.kill("SIGTERM");
         } catch (error) {
           console.log(
             "FFmpeg already stopped."
