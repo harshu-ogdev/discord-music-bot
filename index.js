@@ -6,16 +6,9 @@ const {
   SlashCommandBuilder
 } = require("discord.js");
 
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  NoSubscriberBehavior,
-  StreamType
-} = require("@discordjs/voice");
+const { DisTube } = require("distube");
+const { YouTubePlugin } = require("@distube/youtube");
 
-const { spawn } = require("child_process");
-const ffmpegPath = require("ffmpeg-static");
 const express = require("express");
 
 // =========================
@@ -26,6 +19,17 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates
+  ]
+});
+
+// =========================
+// DISTUBE
+// =========================
+
+const distube = new DisTube(client, {
+  emitNewSongOnly: true,
+  plugins: [
+    new YouTubePlugin()
   ]
 });
 
@@ -44,14 +48,6 @@ app.listen(process.env.PORT || 3000, () => {
 });
 
 // =========================
-// MUSIC STORAGE
-// =========================
-
-const connections = new Map();
-const players = new Map();
-const ffmpegProcesses = new Map();
-
-// =========================
 // SLASH COMMANDS
 // =========================
 
@@ -66,17 +62,17 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription("Play audio from a direct audio URL")
+    .setDescription("Play a YouTube video")
     .addStringOption(option =>
       option
         .setName("url")
-        .setDescription("Direct audio URL")
+        .setDescription("YouTube video URL")
         .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("stop")
-    .setDescription("Stop the current audio"),
+    .setDescription("Stop the current music"),
 
   new SlashCommandBuilder()
     .setName("leave")
@@ -95,7 +91,6 @@ client.once("ready", async () => {
   );
 
   try {
-    // Register commands directly to your Discord server
     await rest.put(
       Routes.applicationGuildCommands(
         client.user.id,
@@ -108,8 +103,28 @@ client.once("ready", async () => {
 
     console.log("Slash commands registered!");
   } catch (error) {
-    console.error("Could not register commands:", error);
+    console.error(
+      "Could not register commands:",
+      error
+    );
   }
+});
+
+// =========================
+// DISTUBE EVENTS
+// =========================
+
+distube.on("playSong", (queue, song) => {
+  console.log(
+    `Playing: ${song.name}`
+  );
+});
+
+distube.on("error", (error) => {
+  console.error(
+    "DisTube error:",
+    error
+  );
 });
 
 // =========================
@@ -118,8 +133,6 @@ client.once("ready", async () => {
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
-
-  const guildId = interaction.guildId;
 
   // =========================
   // /PING
@@ -138,21 +151,23 @@ client.on("interactionCreate", async interaction => {
 
     if (!channel) {
       return interaction.reply(
-        "❌ You need to join a voice channel first."
+        "❌ Join a voice channel first!"
       );
     }
 
-    const connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: guildId,
-      adapterCreator: channel.guild.voiceAdapterCreator
-    });
+    try {
+      await distube.voices.join(channel);
 
-    connections.set(guildId, connection);
+      return interaction.reply(
+        "✅ Joined your voice channel!"
+      );
+    } catch (error) {
+      console.error(error);
 
-    return interaction.reply(
-      "✅ Joined your voice channel!"
-    );
+      return interaction.reply(
+        "❌ I couldn't join the voice channel."
+      );
+    }
   }
 
   // =========================
@@ -168,132 +183,31 @@ client.on("interactionCreate", async interaction => {
       );
     }
 
-    const url = interaction.options.getString("url", true);
+    const url = interaction.options.getString(
+      "url",
+      true
+    );
 
-    // Check URL
-    let parsedUrl;
-
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return interaction.reply(
-        "❌ That doesn't look like a valid URL."
-      );
-    }
-
-    // Only allow HTTP/HTTPS
     if (
-      parsedUrl.protocol !== "http:" &&
-      parsedUrl.protocol !== "https:"
+      !url.includes("youtube.com/") &&
+      !url.includes("youtu.be/")
     ) {
       return interaction.reply(
-        "❌ Only HTTP and HTTPS URLs are supported."
+        "❌ Please provide a YouTube video URL."
       );
     }
 
     await interaction.deferReply();
 
     try {
-      // Join the user's voice channel
-      const connection = joinVoiceChannel({
-        channelId: channel.id,
-        guildId: guildId,
-        adapterCreator: channel.guild.voiceAdapterCreator
+      await distube.play(channel, url, {
+        textChannel: interaction.channel,
+        member: interaction.member
       });
-
-      connections.set(guildId, connection);
-
-      // Stop previous FFmpeg process
-      const oldProcess = ffmpegProcesses.get(guildId);
-
-      if (oldProcess) {
-        oldProcess.kill();
-      }
-
-      // Create audio player
-      let player = players.get(guildId);
-
-      if (!player) {
-        player = createAudioPlayer({
-          behaviors: {
-            noSubscriber: NoSubscriberBehavior.Stop
-          }
-        });
-
-        players.set(guildId, player);
-      }
-
-      // Start FFmpeg
-      const ffmpeg = spawn(
-        ffmpegPath,
-        [
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-i",
-          url,
-          "-f",
-          "s16le",
-          "-ar",
-          "48000",
-          "-ac",
-          "2",
-          "pipe:1"
-        ],
-        {
-          stdio: [
-            "ignore",
-            "pipe",
-            "pipe"
-          ]
-        }
-      );
-
-      ffmpegProcesses.set(guildId, ffmpeg);
-
-      ffmpeg.stderr.on("data", data => {
-        console.log(
-          `FFmpeg: ${data.toString()}`
-        );
-      });
-
-      ffmpeg.on("error", error => {
-        console.error(
-          "FFmpeg error:",
-          error
-        );
-      });
-
-      ffmpeg.on("close", code => {
-        console.log(
-          `FFmpeg stopped with code ${code}`
-        );
-
-        if (
-          ffmpegProcesses.get(guildId) === ffmpeg
-        ) {
-          ffmpegProcesses.delete(guildId);
-        }
-      });
-
-      // Create Discord audio resource
-      const resource = createAudioResource(
-        ffmpeg.stdout,
-        {
-          inputType: StreamType.Raw
-        }
-      );
-
-      // Play audio
-      player.play(resource);
-
-      // Connect player to Discord
-      connection.subscribe(player);
 
       await interaction.editReply(
-        "▶️ Playing the audio!"
+        "▶️ Starting the video audio!"
       );
-
     } catch (error) {
       console.error(
         "Play error:",
@@ -301,7 +215,7 @@ client.on("interactionCreate", async interaction => {
       );
 
       await interaction.editReply(
-        "❌ I couldn't play that audio URL."
+        "❌ I couldn't play that YouTube video."
       );
     }
 
@@ -313,26 +227,29 @@ client.on("interactionCreate", async interaction => {
   // =========================
 
   if (interaction.commandName === "stop") {
-    const player = players.get(guildId);
+    try {
+      const queue = distube.getQueue(
+        interaction.guildId
+      );
 
-    if (!player) {
+      if (!queue) {
+        return interaction.reply(
+          "❌ Nothing is playing."
+        );
+      }
+
+      await distube.stop(interaction.guildId);
+
       return interaction.reply(
-        "❌ Nothing is playing."
+        "⏹️ Music stopped."
+      );
+    } catch (error) {
+      console.error(error);
+
+      return interaction.reply(
+        "❌ I couldn't stop the music."
       );
     }
-
-    player.stop();
-
-    const ffmpeg = ffmpegProcesses.get(guildId);
-
-    if (ffmpeg) {
-      ffmpeg.kill();
-      ffmpegProcesses.delete(guildId);
-    }
-
-    return interaction.reply(
-      "⏹️ Stopped the music."
-    );
   }
 
   // =========================
@@ -340,35 +257,27 @@ client.on("interactionCreate", async interaction => {
   // =========================
 
   if (interaction.commandName === "leave") {
-    const connection = connections.get(guildId);
+    try {
+      const queue = distube.getQueue(
+        interaction.guildId
+      );
 
-    if (!connection) {
+      if (queue) {
+        await distube.stop(
+          interaction.guildId
+        );
+      }
+
       return interaction.reply(
-        "❌ I'm not in a voice channel."
+        "👋 Left the voice channel!"
+      );
+    } catch (error) {
+      console.error(error);
+
+      return interaction.reply(
+        "❌ I couldn't leave the voice channel."
       );
     }
-
-    const player = players.get(guildId);
-
-    if (player) {
-      player.stop();
-    }
-
-    const ffmpeg = ffmpegProcesses.get(guildId);
-
-    if (ffmpeg) {
-      ffmpeg.kill();
-      ffmpegProcesses.delete(guildId);
-    }
-
-    connection.destroy();
-
-    connections.delete(guildId);
-    players.delete(guildId);
-
-    return interaction.reply(
-      "👋 Left the voice channel!"
-    );
   }
 });
 
@@ -376,4 +285,6 @@ client.on("interactionCreate", async interaction => {
 // LOGIN
 // =========================
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(
+  process.env.DISCORD_TOKEN
+);
