@@ -6,9 +6,16 @@ const {
   SlashCommandBuilder
 } = require("discord.js");
 
-const { DisTube } = require("distube");
-const { YouTubePlugin } = require("@distube/youtube");
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  NoSubscriberBehavior,
+  StreamType
+} = require("@discordjs/voice");
 
+const { spawn } = require("child_process");
+const ffmpegPath = require("ffmpeg-static");
 const express = require("express");
 
 // =========================
@@ -23,18 +30,7 @@ const client = new Client({
 });
 
 // =========================
-// DISTUBE
-// =========================
-
-const distube = new DisTube(client, {
-  emitNewSongOnly: true,
-  plugins: [
-    new YouTubePlugin()
-  ]
-});
-
-// =========================
-// WEB SERVER FOR RENDER
+// RENDER WEB SERVER
 // =========================
 
 const app = express();
@@ -48,6 +44,14 @@ app.listen(process.env.PORT || 3000, () => {
 });
 
 // =========================
+// MUSIC STORAGE
+// =========================
+
+const connections = new Map();
+const players = new Map();
+const ffmpegProcesses = new Map();
+
+// =========================
 // SLASH COMMANDS
 // =========================
 
@@ -58,25 +62,25 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("join")
-    .setDescription("Make the bot join your voice channel"),
+    .setDescription("Join your voice channel"),
 
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription("Play a YouTube video")
+    .setDescription("Search for a song and play its preview")
     .addStringOption(option =>
       option
-        .setName("url")
-        .setDescription("YouTube video URL")
+        .setName("song")
+        .setDescription("Song name or artist and song name")
         .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("stop")
-    .setDescription("Stop the current music"),
+    .setDescription("Stop the current song"),
 
   new SlashCommandBuilder()
     .setName("leave")
-    .setDescription("Make the bot leave the voice channel")
+    .setDescription("Leave the voice channel")
 ].map(command => command.toJSON());
 
 // =========================
@@ -111,175 +115,364 @@ client.once("ready", async () => {
 });
 
 // =========================
-// DISTUBE EVENTS
+// SEARCH DEEZER
 // =========================
 
-distube.on("playSong", (queue, song) => {
-  console.log(
-    `Playing: ${song.name}`
-  );
-});
+async function searchSong(songName) {
+  const searchUrl =
+    "https://api.deezer.com/search?q=" +
+    encodeURIComponent(songName) +
+    "&limit=1";
 
-distube.on("error", (error) => {
-  console.error(
-    "DisTube error:",
-    error
+  const response = await fetch(searchUrl);
+
+  if (!response.ok) {
+    throw new Error(
+      `Music search failed: ${response.status}`
+    );
+  }
+
+  const data = await response.json();
+
+  if (
+    !data.data ||
+    data.data.length === 0
+  ) {
+    return null;
+  }
+
+  return data.data[0];
+}
+
+// =========================
+// PLAY PREVIEW
+// =========================
+
+function playAudio(guildId, channel, previewUrl) {
+  // Stop previous FFmpeg
+  const oldFFmpeg =
+    ffmpegProcesses.get(guildId);
+
+  if (oldFFmpeg) {
+    oldFFmpeg.kill();
+  }
+
+  // Get or create player
+  let player = players.get(guildId);
+
+  if (!player) {
+    player = createAudioPlayer({
+      behaviors: {
+        noSubscriber:
+          NoSubscriberBehavior.Stop
+      }
+    });
+
+    players.set(guildId, player);
+  }
+
+  // Join voice channel
+  const connection = joinVoiceChannel({
+    channelId: channel.id,
+    guildId: guildId,
+    adapterCreator:
+      channel.guild.voiceAdapterCreator
+  });
+
+  connections.set(guildId, connection);
+
+  // Start FFmpeg
+  const ffmpeg = spawn(
+    ffmpegPath,
+    [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      previewUrl,
+      "-f",
+      "s16le",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "pipe:1"
+    ],
+    {
+      stdio: [
+        "ignore",
+        "pipe",
+        "pipe"
+      ]
+    }
   );
-});
+
+  ffmpegProcesses.set(
+    guildId,
+    ffmpeg
+  );
+
+  ffmpeg.stderr.on("data", data => {
+    console.log(
+      `FFmpeg: ${data.toString()}`
+    );
+  });
+
+  ffmpeg.on("error", error => {
+    console.error(
+      "FFmpeg error:",
+      error
+    );
+  });
+
+  ffmpeg.on("close", code => {
+    console.log(
+      `FFmpeg stopped with code ${code}`
+    );
+
+    if (
+      ffmpegProcesses.get(guildId) ===
+      ffmpeg
+    ) {
+      ffmpegProcesses.delete(guildId);
+    }
+  });
+
+  // Create audio resource
+  const resource =
+    createAudioResource(
+      ffmpeg.stdout,
+      {
+        inputType: StreamType.Raw
+      }
+    );
+
+  // Start playing
+  player.play(resource);
+
+  // Connect player to Discord
+  connection.subscribe(player);
+}
 
 // =========================
 // COMMAND HANDLER
 // =========================
 
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-
-  // =========================
-  // /PING
-  // =========================
-
-  if (interaction.commandName === "ping") {
-    return interaction.reply("🏓 Pong!");
-  }
-
-  // =========================
-  // /JOIN
-  // =========================
-
-  if (interaction.commandName === "join") {
-    const channel = interaction.member.voice.channel;
-
-    if (!channel) {
-      return interaction.reply(
-        "❌ Join a voice channel first!"
-      );
+client.on(
+  "interactionCreate",
+  async interaction => {
+    if (
+      !interaction.isChatInputCommand()
+    ) {
+      return;
     }
 
-    try {
-      await distube.voices.join(channel);
+    const guildId =
+      interaction.guildId;
 
-      return interaction.reply(
-        "✅ Joined your voice channel!"
-      );
-    } catch (error) {
-      console.error(error);
-
-      return interaction.reply(
-        "❌ I couldn't join the voice channel."
-      );
-    }
-  }
-
-  // =========================
-  // /PLAY
-  // =========================
-
-  if (interaction.commandName === "play") {
-    const channel = interaction.member.voice.channel;
-
-    if (!channel) {
-      return interaction.reply(
-        "❌ Join a voice channel first!"
-      );
-    }
-
-    const url = interaction.options.getString(
-      "url",
-      true
-    );
+    // =========================
+    // /PING
+    // =========================
 
     if (
-      !url.includes("youtube.com/") &&
-      !url.includes("youtu.be/")
+      interaction.commandName === "ping"
     ) {
       return interaction.reply(
-        "❌ Please provide a YouTube video URL."
+        "🏓 Pong!"
       );
     }
 
-    await interaction.deferReply();
+    // =========================
+    // /JOIN
+    // =========================
 
-    try {
-      await distube.play(channel, url, {
-        textChannel: interaction.channel,
-        member: interaction.member
-      });
+    if (
+      interaction.commandName === "join"
+    ) {
+      const channel =
+        interaction.member.voice.channel;
 
-      await interaction.editReply(
-        "▶️ Starting the video audio!"
-      );
-    } catch (error) {
-      console.error(
-        "Play error:",
-        error
-      );
+      if (!channel) {
+        return interaction.reply(
+          "❌ Join a voice channel first!"
+        );
+      }
 
-      await interaction.editReply(
-        "❌ I couldn't play that YouTube video."
-      );
+      try {
+        const connection =
+          joinVoiceChannel({
+            channelId: channel.id,
+            guildId: guildId,
+            adapterCreator:
+              channel.guild
+                .voiceAdapterCreator
+          });
+
+        connections.set(
+          guildId,
+          connection
+        );
+
+        return interaction.reply(
+          "✅ Joined your voice channel!"
+        );
+      } catch (error) {
+        console.error(error);
+
+        return interaction.reply(
+          "❌ I couldn't join the voice channel."
+        );
+      }
     }
 
-    return;
-  }
+    // =========================
+    // /PLAY
+    // =========================
 
-  // =========================
-  // /STOP
-  // =========================
+    if (
+      interaction.commandName === "play"
+    ) {
+      const channel =
+        interaction.member.voice.channel;
 
-  if (interaction.commandName === "stop") {
-    try {
-      const queue = distube.getQueue(
-        interaction.guildId
-      );
+      if (!channel) {
+        return interaction.reply(
+          "❌ Join a voice channel first!"
+        );
+      }
 
-      if (!queue) {
+      const songName =
+        interaction.options.getString(
+          "song",
+          true
+        );
+
+      await interaction.deferReply();
+
+      try {
+        console.log(
+          `Searching for: ${songName}`
+        );
+
+        const song =
+          await searchSong(songName);
+
+        if (!song) {
+          return interaction.editReply(
+            "❌ I couldn't find that song."
+          );
+        }
+
+        if (!song.preview) {
+          return interaction.editReply(
+            "❌ This song doesn't have an available preview."
+          );
+        }
+
+        playAudio(
+          guildId,
+          channel,
+          song.preview
+        );
+
+        await interaction.editReply(
+          `▶️ Playing **${song.title}** by **${song.artist.name}**`
+        );
+      } catch (error) {
+        console.error(
+          "Play error:",
+          error
+        );
+
+        await interaction.editReply(
+          "❌ I couldn't play that song."
+        );
+      }
+
+      return;
+    }
+
+    // =========================
+    // /STOP
+    // =========================
+
+    if (
+      interaction.commandName === "stop"
+    ) {
+      const player =
+        players.get(guildId);
+
+      if (!player) {
         return interaction.reply(
           "❌ Nothing is playing."
         );
       }
 
-      await distube.stop(interaction.guildId);
+      player.stop();
 
-      return interaction.reply(
-        "⏹️ Music stopped."
-      );
-    } catch (error) {
-      console.error(error);
+      const ffmpeg =
+        ffmpegProcesses.get(
+          guildId
+        );
 
-      return interaction.reply(
-        "❌ I couldn't stop the music."
-      );
-    }
-  }
-
-  // =========================
-  // /LEAVE
-  // =========================
-
-  if (interaction.commandName === "leave") {
-    try {
-      const queue = distube.getQueue(
-        interaction.guildId
-      );
-
-      if (queue) {
-        await distube.stop(
-          interaction.guildId
+      if (ffmpeg) {
+        ffmpeg.kill();
+        ffmpegProcesses.delete(
+          guildId
         );
       }
 
       return interaction.reply(
-        "👋 Left the voice channel!"
+        "⏹️ Stopped the music."
       );
-    } catch (error) {
-      console.error(error);
+    }
+
+    // =========================
+    // /LEAVE
+    // =========================
+
+    if (
+      interaction.commandName === "leave"
+    ) {
+      const connection =
+        connections.get(guildId);
+
+      if (!connection) {
+        return interaction.reply(
+          "❌ I'm not in a voice channel."
+        );
+      }
+
+      const player =
+        players.get(guildId);
+
+      if (player) {
+        player.stop();
+      }
+
+      const ffmpeg =
+        ffmpegProcesses.get(
+          guildId
+        );
+
+      if (ffmpeg) {
+        ffmpeg.kill();
+        ffmpegProcesses.delete(
+          guildId
+        );
+      }
+
+      connection.destroy();
+
+      connections.delete(guildId);
+      players.delete(guildId);
 
       return interaction.reply(
-        "❌ I couldn't leave the voice channel."
+        "👋 Left the voice channel!"
       );
     }
   }
-});
+);
 
 // =========================
 // LOGIN
