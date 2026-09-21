@@ -95,8 +95,12 @@ client.once("ready", async () => {
   );
 
   try {
+    // Register commands directly to your Discord server
     await rest.put(
-      Routes.applicationCommands(client.user.id),
+      Routes.applicationGuildCommands(
+        client.user.id,
+        "1532066190829293658"
+      ),
       {
         body: commands
       }
@@ -166,7 +170,7 @@ client.on("interactionCreate", async interaction => {
 
     const url = interaction.options.getString("url", true);
 
-    // Check that the URL is valid
+    // Check URL
     let parsedUrl;
 
     try {
@@ -190,7 +194,7 @@ client.on("interactionCreate", async interaction => {
     await interaction.deferReply();
 
     try {
-      // Join voice channel
+      // Join the user's voice channel
       const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: guildId,
@@ -206,7 +210,7 @@ client.on("interactionCreate", async interaction => {
         oldProcess.kill();
       }
 
-      // Create or reuse audio player
+      // Create audio player
       let player = players.get(guildId);
 
       if (!player) {
@@ -247,7 +251,6 @@ client.on("interactionCreate", async interaction => {
 
       ffmpegProcesses.set(guildId, ffmpeg);
 
-      // Show FFmpeg errors in Render logs
       ffmpeg.stderr.on("data", data => {
         console.log(
           `FFmpeg: ${data.toString()}`
